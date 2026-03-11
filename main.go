@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,6 +25,7 @@ func main() {
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.handleMetrics)
 	mux.HandleFunc("POST /admin/reset", cfg.handleReset)
+	mux.HandleFunc("POST /api/validate_chirp", handleValidate)
 	mux.HandleFunc("GET /api/healthz", handleHealthz)
 
 	server := http.Server{
@@ -32,6 +34,38 @@ func main() {
 	}
 
 	log.Fatal(server.ListenAndServe())
+}
+
+type validationPayload struct {
+	Body string `json:"body"`
+}
+
+func handleValidate(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	payload := validationPayload{}
+	err := decoder.Decode(&payload)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+
+	if len(payload.Body) > 140 {
+		handleError(w, http.StatusBadRequest, "Chirp too long")
+		return
+	}
+
+	resp, _ := json.Marshal(struct {
+		Valid bool `json:"valid"`
+	}{Valid: true})
+	w.Write(resp)
+}
+
+func handleError(w http.ResponseWriter, statusCode int, err string) {
+	w.WriteHeader(statusCode)
+	resp, _ := json.Marshal(struct {
+		Error string `json:"error"`
+	}{Error: err})
+	w.Write(resp)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
