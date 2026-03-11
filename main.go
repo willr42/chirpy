@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -54,9 +55,11 @@ func handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cleanBody := filterBannedWords(payload.Body)
+
 	resp, _ := json.Marshal(struct {
-		Valid bool `json:"valid"`
-	}{Valid: true})
+		Body string `json:"cleaned_body"`
+	}{Body: cleanBody})
 	w.Write(resp)
 }
 
@@ -93,4 +96,27 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	cfg.fileserverHits.Store(0)
 	fmt.Fprintf(w, "Hits reset\n")
+}
+
+func filterBannedWords(s string) string {
+
+	var BANNED_WORDS = [...]string{
+		"kerfuffle",
+		"sharbert",
+		"fornax",
+	}
+	cleaned := []string{}
+
+	for word := range strings.SplitSeq(s, " ") {
+		cleaned_word := word
+
+		for _, banned_word := range BANNED_WORDS {
+			if strings.ToLower(word) == banned_word {
+				cleaned_word = "****"
+			}
+		}
+		cleaned = append(cleaned, cleaned_word)
+	}
+
+	return strings.Join(cleaned, " ")
 }
