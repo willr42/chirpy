@@ -50,7 +50,9 @@ func main() {
 	mux.Handle("POST /admin/reset", checkEnv(http.HandlerFunc(cfg.handleReset)))
 	mux.HandleFunc("POST /api/users", cfg.handleCreateUser)
 	mux.HandleFunc("GET /api/healthz", handleHealthz)
-	mux.HandleFunc("POST /api/validate_chirp", handleValidate)
+	mux.HandleFunc("GET /api/chirps", cfg.handleGetAllChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpId}", cfg.handleGetChirp)
+	mux.HandleFunc("POST /api/chirps", cfg.handleCreateChirp)
 
 	server := http.Server{
 		Addr:    ":8080",
@@ -60,13 +62,22 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-type validationPayload struct {
-	Body string `json:"body"`
+type chirpPayload struct {
+	Body   string    `json:"body"`
+	UserId uuid.UUID `json:"user_id"`
 }
 
-func handleValidate(w http.ResponseWriter, r *http.Request) {
+type chirp struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
+}
+
+func (cfg *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
-	payload := validationPayload{}
+	payload := chirpPayload{}
 	err := decoder.Decode(&payload)
 	if err != nil {
 		handleError(w, http.StatusBadRequest, "malformed request")
@@ -80,9 +91,64 @@ func handleValidate(w http.ResponseWriter, r *http.Request) {
 
 	cleanBody := filterBannedWords(payload.Body)
 
-	resp, _ := json.Marshal(struct {
-		Body string `json:"cleaned_body"`
-	}{Body: cleanBody})
+	timestamp := time.Now()
+
+	dbRes, err := cfg.db.CreateChirp(context.Background(), database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: timestamp,
+		UpdatedAt: timestamp,
+		Body:      cleanBody,
+		UserID:    payload.UserId,
+	})
+	if err != nil {
+		handleError(w, http.StatusInternalServerError, "could not create chirp")
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	resp, _ := json.Marshal(
+		chirp{Id: dbRes.ID, CreatedAt: dbRes.CreatedAt, UpdatedAt: dbRes.UpdatedAt, Body: dbRes.Body, UserId: dbRes.UserID})
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("chirpId")
+	parsedId, err := uuid.Parse(id)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "invalid chirp id")
+		return
+	}
+
+	dbRes, err := cfg.db.GetChirp(context.Background(), parsedId)
+	if err != nil {
+		handleError(w, http.StatusNotFound, "could not get chirp")
+		return
+	}
+
+	resp, _ := json.Marshal(
+		chirp{Id: dbRes.ID, CreatedAt: dbRes.CreatedAt, UpdatedAt: dbRes.UpdatedAt, Body: dbRes.Body, UserId: dbRes.UserID})
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleGetAllChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.db.GetAllChirps(context.Background())
+	if err != nil {
+		handleError(w, http.StatusInternalServerError, "couldn't get all chirps")
+		return
+	}
+	chirps := make([]chirp, len(dbChirps))
+
+	for i, c := range dbChirps {
+		chirps[i] = chirp{
+			Id:        c.ID,
+			CreatedAt: c.CreatedAt,
+			UpdatedAt: c.UpdatedAt,
+			Body:      c.Body,
+			UserId:    c.UserID,
+		}
+	}
+
+	resp, _ := json.Marshal(chirps)
 	w.Write(resp)
 }
 
@@ -168,12 +234,12 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, _ := json.Marshal(struct {
-		Id        string    `json:"id"`
+		Id        uuid.UUID `json:"id"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
 		Email     string    `json:"email"`
 	}{
-		Id:        db.ID.String(),
+		Id:        db.ID,
 		CreatedAt: db.CreatedAt,
 		UpdatedAt: db.UpdatedAt,
 		Email:     db.Email,
