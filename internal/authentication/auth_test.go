@@ -3,6 +3,8 @@ package authentication
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +17,12 @@ func TestSuccessfulHashCheck(t *testing.T) {
 	pw := "test"
 	hash, err := HashPassword(pw)
 	if err != nil {
-		t.Errorf("could not hash %v, got %v\n", pw, err)
+		t.Fatalf("could not hash %v, got %v\n", pw, err)
 	}
 
 	_, err = CheckPasswordHash(pw, hash)
 	if err != nil {
-		t.Errorf("hash %v did not match %v; err %v\n", hash, pw, err)
+		t.Fatalf("hash %v did not match %v; err %v\n", hash, pw, err)
 	}
 }
 
@@ -28,15 +30,15 @@ func TestUnsuccessfulHashCheck(t *testing.T) {
 	pw := "test"
 	hash, err := HashPassword(pw)
 	if err != nil {
-		t.Errorf("could not hash %v, got %v\n", pw, err)
+		t.Fatalf("could not hash %v, got %v\n", pw, err)
 	}
 
 	match, err := CheckPasswordHash("asdf", hash)
 	if err != nil {
-		t.Errorf("unexpected error %v\n", err)
+		t.Fatalf("unexpected error %v\n", err)
 	}
 	if match {
-		t.Errorf("hash %v matched %v somehow.", hash, pw)
+		t.Fatalf("hash %v matched %v somehow.", hash, pw)
 	}
 }
 
@@ -46,16 +48,16 @@ func TestSuccessfulJWT(t *testing.T) {
 	rand.Read(secret)
 	jwt, err := MakeJWT(user_uuid, secret, time.Hour)
 	if err != nil {
-		t.Errorf("error making JWT: %v\n", err)
+		t.Fatalf("error making JWT: %v\n", err)
 	}
 
 	retrieved_id, err := ValidateJWT(jwt, secret)
 	if err != nil {
-		t.Errorf("error validating: %v\n", err)
+		t.Fatalf("error validating: %v\n", err)
 	}
 
 	if user_uuid != retrieved_id {
-		t.Errorf("initial uuid did not match jwt id")
+		t.Fatalf("initial uuid did not match jwt id")
 	}
 }
 func TestExpiredJWT(t *testing.T) {
@@ -64,12 +66,12 @@ func TestExpiredJWT(t *testing.T) {
 	rand.Read(secret)
 	token, err := MakeJWT(user_uuid, secret, -time.Second)
 	if err != nil {
-		t.Errorf("error making JWT: %v\n", err)
+		t.Fatalf("error making JWT: %v\n", err)
 	}
 
 	_, err = ValidateJWT(token, secret)
 	if err == nil {
-		t.Error("somehow validated expired token\n")
+		t.Fatalf("somehow validated expired token\n")
 	}
 }
 
@@ -87,7 +89,7 @@ func TestMalformedSubjectJWT(t *testing.T) {
 
 	_, err = ValidateJWT(tokenString, secret)
 	if err == nil {
-		t.Error("expected error for non-UUID subject, got nil")
+		t.Fatalf("expected error for non-UUID subject, got nil")
 	}
 }
 
@@ -113,5 +115,52 @@ func TestTamperedJWT(t *testing.T) {
 	_, err = ValidateJWT(tamperedToken, secret)
 	if err == nil {
 		t.Error("expected error for tampered token, got nil")
+	}
+}
+
+func TestValidBearer(t *testing.T) {
+	jwt := "asdf"
+	bearer := "Bearer " + jwt
+	req, err := http.NewRequest("GET", "", &io.LimitedReader{})
+	if err != nil {
+		t.Fatalf("couldn't construct dummy req: %v", err)
+	}
+
+	req.Header.Add("Authorization", bearer)
+	token, err := GetBearerToken(req.Header)
+	if err != nil {
+		t.Fatalf("couldn't get bearer: %v", err)
+	}
+
+	if token != jwt {
+		t.Fatalf("token %v didn't match bearer %v", token, jwt)
+	}
+
+}
+
+func TestInvalidBearer(t *testing.T) {
+	jwt := "asdf"
+	bearer := "Bearrrrrr " + jwt
+	req, err := http.NewRequest("GET", "", &io.LimitedReader{})
+	if err != nil {
+		t.Fatalf("couldn't construct dummy req: %v", err)
+	}
+
+	req.Header.Add("Authorization", bearer)
+	_, err = GetBearerToken(req.Header)
+	if err == nil {
+		t.Fatalf("somehow got invalid bearer value: %v", err)
+	}
+}
+
+func TestMissingBearer(t *testing.T) {
+	req, err := http.NewRequest("GET", "", &io.LimitedReader{})
+	if err != nil {
+		t.Fatalf("couldn't construct dummy req: %v", err)
+	}
+
+	_, err = GetBearerToken(req.Header)
+	if err == nil {
+		t.Fatalf("somehow got non-existent Authorization header: %v", err)
 	}
 }
