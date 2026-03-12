@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
+	"github.com/willr42/chirpy/internal/authentication"
 	"github.com/willr42/chirpy/internal/database"
 )
 
@@ -48,7 +49,8 @@ func main() {
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	mux.HandleFunc("GET /admin/metrics", cfg.handleMetrics)
 	mux.Handle("POST /admin/reset", checkEnv(http.HandlerFunc(cfg.handleReset)))
-	mux.HandleFunc("POST /api/users", cfg.handleCreateUser)
+	mux.HandleFunc("POST /api/users", cfg.handleRegister)
+	mux.HandleFunc("POST /api/login", cfg.handleLogin)
 	mux.HandleFunc("GET /api/healthz", handleHealthz)
 	mux.HandleFunc("GET /api/chirps", cfg.handleGetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", cfg.handleGetChirp)
@@ -201,13 +203,14 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hits reset\n")
 }
 
-type createUserPayload struct {
-	Email string `json:"email"`
+type userPayload struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
-func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleRegister(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
-	payload := createUserPayload{}
+	payload := userPayload{}
 	err := decoder.Decode(&payload)
 	if err != nil {
 		handleError(w, http.StatusBadRequest, "malformed request")
@@ -215,12 +218,17 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timestamp := time.Now()
+	hashed, err := authentication.HashPassword(payload.Password)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "password error")
+	}
 
 	db, err := cfg.db.CreateUser(context.Background(), database.CreateUserParams{
-		ID:        uuid.New(),
-		CreatedAt: timestamp,
-		UpdatedAt: timestamp,
-		Email:     payload.Email,
+		ID:             uuid.New(),
+		CreatedAt:      timestamp,
+		UpdatedAt:      timestamp,
+		Email:          payload.Email,
+		HashedPassword: hashed,
 	})
 	if err != nil {
 		if pqError, ok := errors.AsType[*pq.Error](err); ok {
@@ -245,6 +253,42 @@ func (cfg *apiConfig) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		Email:     db.Email,
 	})
 	w.WriteHeader(http.StatusCreated)
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	payload := userPayload{}
+	err := decoder.Decode(&payload)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+
+	dbUser, err := cfg.db.GetUserByEmail(context.Background(), payload.Email)
+	if err != nil {
+		handleError(w, http.StatusInternalServerError, fmt.Sprintf("couldn't get user %v", err))
+		return
+	}
+
+	ok, err := authentication.CheckPasswordHash(payload.Password, dbUser.HashedPassword)
+	if err != nil || !ok {
+		handleError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	resp, _ := json.Marshal(struct {
+		Id        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}{
+		Id:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	})
+	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
 }
 
