@@ -56,6 +56,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handleHealthz)
 	mux.HandleFunc("GET /api/chirps", cfg.handleGetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", cfg.handleGetChirp)
+	mux.Handle("DELETE /api/chirps/{chirpId}", cfg.checkAuth(http.HandlerFunc(cfg.handleDeleteChirp)))
 	mux.Handle("POST /api/chirps", cfg.checkAuth(http.HandlerFunc(cfg.handleCreateChirp)))
 
 	server := http.Server{
@@ -115,6 +116,36 @@ func (cfg *apiConfig) handleCreateChirp(w http.ResponseWriter, r *http.Request) 
 	resp, _ := json.Marshal(
 		chirp{Id: dbRes.ID, CreatedAt: dbRes.CreatedAt, UpdatedAt: dbRes.UpdatedAt, Body: dbRes.Body, UserId: dbRes.UserID})
 	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("chirpId")
+	chirpId, err := uuid.Parse(id)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "invalid chirp id")
+		return
+	}
+
+	dbChirp, err := cfg.db.GetChirp(context.Background(), chirpId)
+	if err != nil {
+		handleError(w, http.StatusNotFound, "could not get chirp")
+		return
+	}
+
+	userID := r.Context().Value(userIDKey).(uuid.UUID)
+
+	if dbChirp.UserID != userID {
+		handleError(w, http.StatusForbidden, "not your chirp")
+		return
+	}
+
+	err = cfg.db.DeleteChirp(context.Background(), dbChirp.ID)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		handleError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) handleGetChirp(w http.ResponseWriter, r *http.Request) {
