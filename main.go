@@ -53,6 +53,8 @@ func main() {
 	mux.Handle("POST /admin/reset", checkEnv(http.HandlerFunc(cfg.handleReset)))
 	mux.HandleFunc("POST /api/users", cfg.handleRegister)
 	mux.HandleFunc("POST /api/login", cfg.handleLogin)
+	mux.HandleFunc("POST /api/refresh", cfg.handleRefresh)
+	mux.HandleFunc("POST /api/revoke", cfg.handleRevoke)
 	mux.HandleFunc("GET /api/healthz", handleHealthz)
 	mux.HandleFunc("GET /api/chirps", cfg.handleGetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", cfg.handleGetChirp)
@@ -231,9 +233,8 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 type userPayload struct {
-	Email           string `json:"email"`
-	Password        string `json:"password"`
-	ExpiryInSeconds int    `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func (cfg *apiConfig) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -305,31 +306,97 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiry := time.Hour
-	if payload.ExpiryInSeconds != 0 && time.Duration(payload.ExpiryInSeconds)*time.Second <= time.Hour {
-		expiry = time.Duration(payload.ExpiryInSeconds) * time.Second
-	}
-
-	token, err := authentication.MakeJWT(dbUser.ID, cfg.jwtSecret, expiry)
+	accessToken, err := authentication.MakeJWT(dbUser.ID, cfg.jwtSecret, time.Hour)
 	if err != nil {
 		handleError(w, http.StatusInternalServerError, "could not generate token")
 	}
 
+	refreshToken := authentication.MakeRefreshToken()
+	timestamp := time.Now()
+
+	_, err = cfg.db.CreateRefreshToken(context.Background(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		CreatedAt: timestamp,
+		UpdatedAt: timestamp,
+		UserID:    dbUser.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	})
+
 	resp, _ := json.Marshal(struct {
-		Id        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-		Token     string    `json:"token"`
+		Id           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
 	}{
-		Id:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
-		Token:     token,
+		Id:           dbUser.ID,
+		CreatedAt:    dbUser.CreatedAt,
+		UpdatedAt:    dbUser.UpdatedAt,
+		Email:        dbUser.Email,
+		Token:        accessToken,
+		RefreshToken: refreshToken,
 	})
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := authentication.GetBearerToken(r.Header)
+	if err != nil {
+		fmt.Printf("err> %v", err)
+		handleError(w, http.StatusUnauthorized, "couldn't get token")
+		return
+	}
+
+	dbRefreshToken, err := cfg.db.GetRefreshTokenByToken(context.Background(), refreshToken)
+	if err != nil {
+		fmt.Printf("err> %v", err)
+		handleError(w, http.StatusUnauthorized, "couldn't get token")
+		return
+	}
+
+	if dbRefreshToken.RevokedAt.Valid || time.Now().After(dbRefreshToken.ExpiresAt) {
+		fmt.Printf("revoked> %v", dbRefreshToken.RevokedAt)
+		handleError(w, http.StatusUnauthorized, "token revoked")
+		return
+	}
+
+	newAccessToken, err := authentication.MakeJWT(dbRefreshToken.UserID, cfg.jwtSecret, time.Hour)
+	if err != nil {
+		handleError(w, http.StatusInternalServerError, "couldn't make new token")
+		return
+	}
+
+	resp, _ := json.Marshal(struct {
+		Token string `json:"token"`
+	}{
+		Token: newAccessToken,
+	})
+	w.WriteHeader(http.StatusOK)
+	w.Write(resp)
+}
+
+func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := authentication.GetBearerToken(r.Header)
+	if err != nil {
+		fmt.Printf("err> %v", err)
+		handleError(w, http.StatusUnauthorized, "couldn't get token")
+		return
+	}
+
+	timestamp := time.Now()
+
+	cfg.db.RevokeRefreshToken(context.Background(), database.RevokeRefreshTokenParams{
+		RevokedAt: sql.NullTime{
+			Time:  timestamp,
+			Valid: true,
+		},
+		UpdatedAt: timestamp,
+		Token:     refreshToken,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func filterBannedWords(s string) string {
