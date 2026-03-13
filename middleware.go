@@ -14,7 +14,7 @@ func (cfg *apiConfig) checkAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, err := authentication.GetBearerToken(r.Header)
 		if err != nil {
-			handleError(w, http.StatusInternalServerError, "error getting headers")
+			handleError(w, http.StatusUnauthorized, "error getting headers")
 			return
 		}
 

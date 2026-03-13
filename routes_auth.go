@@ -176,3 +176,42 @@ func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (cfg *apiConfig) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	payload := userPayload{}
+	err := decoder.Decode(&payload)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+
+	userID := r.Context().Value(userIDKey).(uuid.UUID)
+	timestamp := time.Now()
+	hashed_password, err := authentication.HashPassword(payload.Password)
+	if err != nil {
+		handleError(w, http.StatusBadRequest, "password error")
+		return
+	}
+
+	updatedUser, err := cfg.db.UpdateUser(context.Background(), database.UpdateUserParams{
+		Email:          payload.Email,
+		HashedPassword: hashed_password,
+		UpdatedAt:      timestamp,
+		ID:             userID,
+	})
+
+	resp, _ := json.Marshal(struct {
+		Id        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}{
+		Id:        updatedUser.ID,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+		Email:     updatedUser.Email,
+	})
+	w.WriteHeader(http.StatusOK)
+	w.Write(resp)
+}
